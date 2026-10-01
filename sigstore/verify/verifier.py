@@ -317,6 +317,14 @@ class Verifier:
         # MUST perform steps (7) and (8) separately, since they vary based on
         # the kind of verification being performed (i.e. hashedrekord, DSSE, etc.)
 
+        # Steps (4) through (8) all depend on a transparency log entry. Bundles
+        # signed without a transparency log are not yet verifiable.
+        if not bundle.has_log_entry:
+            raise VerificationError(
+                "bundle has no transparency log entry; verifying bundles signed "
+                "without a transparency log is not supported"
+            )
+
         cert = bundle.signing_certificate
 
         # (0): Establishing a Time for the Signature

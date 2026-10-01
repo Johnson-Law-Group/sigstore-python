@@ -142,6 +142,47 @@ class TestBundle:
         ):
             signing_bundle("bundle_no_log_entry.txt")
 
+    def test_no_log_entry_with_signed_timestamp(self, asset):
+        # A bundle signed without a transparency log carries a signed
+        # timestamp as its only source of signed time.
+        bundle_dict = json.loads(asset("tsa/bundle.txt.sigstore").read_bytes())
+        bundle_dict["verificationMaterial"]["tlogEntries"] = []
+
+        bundle = Bundle.from_json(json.dumps(bundle_dict))
+
+        assert not bundle.has_log_entry
+        assert bundle.verification_material.timestamp_verification_data
+        with pytest.raises(InvalidBundle, match="does not contain a log entry"):
+            bundle.log_entry
+
+        assert json.loads(Bundle.from_json(bundle.to_json()).to_json()) == json.loads(
+            bundle.to_json()
+        )
+
+    def test_no_log_entry_or_signed_timestamp(self, asset):
+        bundle_dict = json.loads(asset("tsa/bundle.txt.sigstore").read_bytes())
+        bundle_dict["verificationMaterial"]["tlogEntries"] = []
+        del bundle_dict["verificationMaterial"]["timestampVerificationData"]
+
+        with pytest.raises(
+            InvalidBundle,
+            match=r"bundle must contain a log entry or signed timestamp\(s\)",
+        ):
+            Bundle.from_json(json.dumps(bundle_dict))
+
+    def test_multiple_log_entries(self, asset):
+        bundle_dict = json.loads(asset("tsa/bundle.txt.sigstore").read_bytes())
+        (entry,) = bundle_dict["verificationMaterial"]["tlogEntries"]
+        bundle_dict["verificationMaterial"]["tlogEntries"] = [entry, entry]
+
+        with pytest.raises(InvalidBundle, match="expected at most one log entry"):
+            Bundle.from_json(json.dumps(bundle_dict))
+
+    def test_has_log_entry(self, signing_bundle):
+        _, bundle = signing_bundle("bundle.txt")
+        assert bundle.has_log_entry
+        assert bundle.log_entry is not None
+
     def test_verification_materials_offline_no_checkpoint(self, signing_bundle):
         with pytest.raises(
             InvalidBundle, match="entry must contain inclusion proof, with checkpoint"

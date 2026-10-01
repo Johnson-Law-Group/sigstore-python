@@ -318,6 +318,18 @@ class TestVerifierWithTimestamp:
             null_policy,
         )
 
+    def test_verifier_rejects_bundle_without_log_entry(
+        self, verifier, asset, null_policy
+    ):
+        bundle_dict = json.loads(asset("tsa/bundle.txt.sigstore").read_bytes())
+        bundle_dict["verificationMaterial"]["tlogEntries"] = []
+        bundle = Bundle.from_json(json.dumps(bundle_dict))
+
+        with pytest.raises(VerificationError, match="no transparency log entry"):
+            verifier.verify_artifact(
+                asset("tsa/bundle.txt").read_bytes(), bundle, null_policy
+            )
+
     def test_verifier_without_timestamp(
         self, verifier, asset, null_policy, monkeypatch
     ):

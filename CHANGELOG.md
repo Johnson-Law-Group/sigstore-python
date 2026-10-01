@@ -8,6 +8,17 @@ All versions prior to 0.9.0 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* Signing now supports Sigstore instances that have a timestamp authority but
+  no transparency log, such as GitHub's instance for private repositories.
+  A `SigningConfig` now requires at least one transparency log *or* timestamp
+  authority, and `SigningContext` accepts `rekor=None` when it has at least one
+  timestamp authority. The resulting bundles carry signed timestamps and no
+  transparency log entry. Verifying such bundles is not yet supported.
+* `Bundle.has_log_entry` reports whether a bundle contains a transparency log
+  entry. `Bundle.log_entry` raises `InvalidBundle` for a bundle without one.
+
 ### Fixed
 
 * Parsing a malformed in-toto statement now includes the underlying validation

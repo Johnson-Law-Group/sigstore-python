@@ -439,10 +439,26 @@ class Bundle:
         self._signing_certificate = leaf_cert
 
         # Extract the log entry. For the time being, we expect
-        # bundles to only contain a single log entry.
+        # bundles to contain at most a single log entry.
         tlog_entries = self._inner.verification_material.tlog_entries
-        if len(tlog_entries) != 1:
-            raise InvalidBundle("expected exactly one log entry in bundle")
+        if len(tlog_entries) > 1:
+            raise InvalidBundle("expected at most one log entry in bundle")
+
+        # A bundle may omit the log entry entirely when a signed timestamp
+        # provides its source of signed time instead. This is what signing
+        # against a Sigstore instance with a timestamp authority but no
+        # transparency log produces. 0.1 bundles predate signed timestamps
+        # and always require an inclusion promise, so they need a log entry.
+        if not tlog_entries:
+            if media_type == Bundle.BundleType.BUNDLE_0_1:
+                raise InvalidBundle("expected exactly one log entry in bundle")
+            if not self.verification_material.timestamp_verification_data:
+                raise InvalidBundle(
+                    "bundle must contain a log entry or signed timestamp(s)"
+                )
+            self._log_entry: TransparencyLogEntry | None = None
+            return
+
         tlog_entry = tlog_entries[0]
 
         if tlog_entry.kind_version.version not in ["0.0.1", "0.0.2"]:
@@ -503,8 +519,25 @@ class Bundle:
         """
         Returns the bundle's log entry, containing an inclusion proof
         (with checkpoint) and an inclusion promise (if the latter is present).
+
+        Raises `InvalidBundle` if the bundle has no log entry, which happens
+        when it was signed without a transparency log. Use `has_log_entry`
+        to check first.
         """
+        if self._log_entry is None:
+            raise InvalidBundle("bundle does not contain a log entry")
         return self._log_entry
+
+    @property
+    def has_log_entry(self) -> bool:
+        """
+        Returns whether the bundle contains a transparency log entry.
+
+        A bundle signed against a Sigstore instance with a timestamp authority
+        but no transparency log has none, and relies on its signed timestamp(s)
+        for signed time instead.
+        """
+        return self._log_entry is not None
 
     @property
     def _dsse_envelope(self) -> dsse.Envelope | None:
@@ -555,7 +588,9 @@ class Bundle:
 
     def _to_parts(
         self,
-    ) -> tuple[Certificate, MessageSignature | dsse.Envelope, TransparencyLogEntry]:
+    ) -> tuple[
+        Certificate, MessageSignature | dsse.Envelope, TransparencyLogEntry | None
+    ]:
         """
         Decompose the `Bundle` into its core constituent parts.
 
@@ -568,7 +603,7 @@ class Bundle:
         else:
             content = self._inner.message_signature  # type: ignore[assignment]
 
-        return (self.signing_certificate, content, self.log_entry)
+        return (self.signing_certificate, content, self._log_entry)
 
     @classmethod
     def from_parts(
@@ -588,10 +623,12 @@ class Bundle:
         cls,
         cert: Certificate,
         content: MessageSignature | dsse.Envelope,
-        log_entry: TransparencyLogEntry,
+        log_entry: TransparencyLogEntry | None,
         signed_timestamp: list[TimeStampResponse] | None = None,
     ) -> Bundle:
         """
+        `log_entry` may be `None` only if `signed_timestamp` is non-empty.
+
         @private
         """
 
@@ -622,7 +659,7 @@ class Bundle:
                 certificate=common_v1.X509Certificate(
                     raw_bytes=base64.b64encode(cert.public_bytes(Encoding.DER))
                 ),
-                tlog_entries=[log_entry._inner],
+                tlog_entries=[log_entry._inner] if log_entry is not None else [],
                 timestamp_verification_data=timestamp_verifcation_data,
             ),
             message_signature=message_signature,
@@ -677,12 +714,20 @@ class SigningConfig:
         self._tlogs = self._get_valid_services(
             self._inner.rekor_tlog_urls, tlog_versions, self._inner.rekor_tlog_config
         )
-        if not self._tlogs:
-            raise Error("No valid Rekor transparency log found in signing config")
-
         self._tsas = self._get_valid_services(
             self._inner.tsa_urls, TSA_VERSIONS, self._inner.tsa_config
         )
+
+        # A signature needs at least one source of signed time: a transparency
+        # log entry, a signed timestamp, or both. Some Sigstore instances (e.g.
+        # GitHub's, for private repositories) deliberately run a timestamp
+        # authority without a transparency log, so that certificate identities
+        # are not published to a public log.
+        if not self._tlogs and not self._tsas:
+            raise Error(
+                "No valid Rekor transparency log or timestamp authority found "
+                "in signing config"
+            )
 
         self._fulcios = self._get_valid_services(
             self._inner.ca_urls, FULCIO_VERSIONS, None
@@ -753,6 +798,9 @@ class SigningConfig:
     def get_tlogs(self) -> list[RekorLogSubmitter]:
         """
         Returns the rekor transparency log clients to sign with.
+
+        The list is empty if the signing config has no transparency log, in
+        which case it has at least one timestamp authority.
         """
         result: list[RekorLogSubmitter] = []
         for tlog in self._tlogs:

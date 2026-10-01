@@ -726,9 +726,10 @@ def _sign_file_threaded(
         _logger.error("Signature failed: Fulcio signing certificate has expired")
         raise exp_certificate
 
-    _logger.info(
-        f"Transparency log entry created at index: {result.log_entry._inner.log_index}"
-    )
+    if result.log_entry is not None:
+        _logger.info(
+            f"Transparency log entry created at index: {result.log_entry._inner.log_index}"
+        )
 
     if outputs.signature is not None:
         signature = base64.b64encode(result.signature).decode()

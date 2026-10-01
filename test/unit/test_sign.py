@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from sigstore_models.common.v1 import HashAlgorithm
 
 import sigstore.oidc
+from sigstore._internal.timestamp import TimestampError
 from sigstore.dsse import StatementBuilder, Subject
 from sigstore.errors import VerificationError
 from sigstore.hashes import Hashed
@@ -238,3 +239,86 @@ def test_sign_dsse(staging):
         bundle = signer.sign_dsse(stmt)
         # Ensures that all of our inner types serialize as expected.
         bundle.to_json()
+
+
+class _FakeTimestamp:
+    def as_bytes(self) -> bytes:
+        return b"timestamp"
+
+
+class _FakeTSA:
+    url = "https://tsa.example.com"
+
+    def __init__(self, error: Exception | None = None):
+        self._error = error
+
+    def request_timestamp(self, signature: bytes):
+        if self._error is not None:
+            raise self._error
+        return _FakeTimestamp()
+
+
+def _tsa_only_signer(monkeypatch, signing_bundle, tsa: _FakeTSA) -> Signer:
+    """
+    Build a `Signer` for a `SigningContext` that has a timestamp authority but
+    no transparency log, without any network access.
+    """
+    _, bundle = signing_bundle("bundle_v3.txt")
+
+    ctx = SigningContext(
+        fulcio=pretend.stub(),
+        rekor=None,
+        trusted_root=pretend.stub(),
+        tsa_clients=[tsa],
+    )
+
+    signer = Signer.__new__(Signer)
+    signer._signing_ctx = ctx
+    signer._Signer__cached_private_key = ec.generate_private_key(ec.SECP256R1())
+    monkeypatch.setattr(
+        signer, "_signing_cert", lambda: bundle.signing_certificate, raising=False
+    )
+    return signer
+
+
+def test_signing_context_requires_signed_time_source():
+    with pytest.raises(ValueError, match="requires a timestamp authority"):
+        SigningContext(fulcio=pretend.stub(), rekor=None, trusted_root=pretend.stub())
+
+
+def test_sign_artifact_without_transparency_log(monkeypatch, signing_bundle):
+    signer = _tsa_only_signer(monkeypatch, signing_bundle, _FakeTSA())
+
+    bundle = signer.sign_artifact(b"hello")
+
+    assert bundle.log_entry is None
+    assert bundle._inner.verification_material.tlog_entries == []
+    timestamps = bundle._inner.verification_material.timestamp_verification_data
+    assert timestamps is not None
+    assert len(timestamps.rfc3161_timestamps) == 1
+
+
+def test_sign_dsse_without_transparency_log(monkeypatch, signing_bundle):
+    signer = _tsa_only_signer(monkeypatch, signing_bundle, _FakeTSA())
+
+    statement = (
+        StatementBuilder(
+            subjects=[Subject(name="foo", digest={"sha256": "00" * 32})],
+            predicate_type="https://example.com/predicate/v1",
+            predicate={},
+        )
+    ).build()
+    bundle = signer.sign_dsse(statement)
+
+    assert bundle.log_entry is None
+    assert bundle._dsse_envelope is not None
+
+
+def test_sign_without_transparency_log_requires_timestamp(monkeypatch, signing_bundle):
+    # With no transparency log, the timestamp is the only source of signed time,
+    # so failing to obtain one must fail the signing operation.
+    tsa = _FakeTSA(error=TimestampError("boom"))
+    signer = _tsa_only_signer(monkeypatch, signing_bundle, tsa)
+
+    with pytest.raises(TimestampError):
+        signer.sign_artifact(b"hello")

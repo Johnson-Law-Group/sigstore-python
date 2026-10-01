@@ -185,10 +185,13 @@ class Signer:
         self,
         cert: x509.Certificate,
         content: MessageSignature | dsse.Envelope,
-        proposed_entry: EntryRequestBody,
+        proposed_entry: EntryRequestBody | None,
     ) -> Bundle:
         """
         Perform the common "finalizing" steps in a Sigstore signing flow.
+
+        `proposed_entry` is `None` if and only if the signing context has no
+        transparency log.
         """
         # If the user provided TSA urls, timestamps the response
         signed_timestamp = []
@@ -196,15 +199,21 @@ class Signer:
             try:
                 signed_timestamp.append(tsa_client.request_timestamp(content.signature))
             except TimestampError as e:
+                # Without a transparency log, the timestamp is the bundle's
+                # only source of signed time, so failing to get one is fatal.
+                if proposed_entry is None:
+                    raise
                 _logger.warning(
                     f"Unable to use {tsa_client.url} to timestamp the bundle. Failed with {e}"
                 )
 
-        # Submit the proposed entry to the transparency log
-        entry = self._signing_ctx._rekor.create_entry(proposed_entry)
-        _logger.debug(
-            f"Transparency log entry created with index: {entry._inner.log_index}"
-        )
+        # Submit the proposed entry to the transparency log, if there is one
+        entry = None
+        if proposed_entry is not None and self._signing_ctx._rekor is not None:
+            entry = self._signing_ctx._rekor.create_entry(proposed_entry)
+            _logger.debug(
+                f"Transparency log entry created with index: {entry._inner.log_index}"
+            )
 
         return Bundle._from_parts(cert, content, entry, signed_timestamp)
 
@@ -224,10 +233,12 @@ class Signer:
         # Sign the statement, producing a DSSE envelope
         content = dsse._sign(self._private_key, input_)
 
-        # Create the proposed DSSE log entry
-        proposed_entry = self._signing_ctx._rekor._build_dsse_request(
-            envelope=content, certificate=cert
-        )
+        # Create the proposed DSSE log entry, if we have a log to submit it to
+        proposed_entry = None
+        if (rekor := self._signing_ctx._rekor) is not None:
+            proposed_entry = rekor._build_dsse_request(
+                envelope=content, certificate=cert
+            )
 
         return self._finalize_sign(cert, content, proposed_entry)
 
@@ -266,10 +277,14 @@ class Signer:
             signature=base64.b64encode(artifact_signature),
         )
 
-        # Create the proposed hashedrekord entry
-        proposed_entry = self._signing_ctx._rekor._build_hashed_rekord_request(
-            hashed_input=hashed_input, signature=artifact_signature, certificate=cert
-        )
+        # Create the proposed hashedrekord entry, if we have a log to submit it to
+        proposed_entry = None
+        if (rekor := self._signing_ctx._rekor) is not None:
+            proposed_entry = rekor._build_hashed_rekord_request(
+                hashed_input=hashed_input,
+                signature=artifact_signature,
+                certificate=cert,
+            )
 
         return self._finalize_sign(cert, content, proposed_entry)
 
@@ -283,7 +298,7 @@ class SigningContext:
         self,
         *,
         fulcio: FulcioClient,
-        rekor: RekorLogSubmitter,
+        rekor: RekorLogSubmitter | None,
         trusted_root: TrustedRoot,
         tsa_clients: list[TimestampAuthorityClient] | None = None,
     ):
@@ -294,8 +309,16 @@ class SigningContext:
         and returning signing certificates.
 
         `rekor` is a `RekorClient` capable of connecting to a Rekor instance
-        and creating transparency log entries.
+        and creating transparency log entries, or `None` for a Sigstore
+        instance without a transparency log. In that case, `tsa_clients` must
+        be non-empty, since a signature would otherwise have no signed time.
         """
+        if rekor is None and not tsa_clients:
+            raise ValueError(
+                "a SigningContext without a transparency log requires a "
+                "timestamp authority"
+            )
+
         self._fulcio = fulcio
         self._rekor = rekor
         self._trusted_root = trusted_root
@@ -309,9 +332,10 @@ class SigningContext:
         @api private
         """
         signing_config = trust_config.signing_config
+        tlogs = signing_config.get_tlogs()
         return cls(
             fulcio=signing_config.get_fulcio(),
-            rekor=signing_config.get_tlogs()[0],
+            rekor=tlogs[0] if tlogs else None,
             trusted_root=trust_config.trusted_root,
             tsa_clients=signing_config.get_tsas(),
         )

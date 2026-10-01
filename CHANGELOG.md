@@ -8,6 +8,15 @@ All versions prior to 0.9.0 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* A `SigningConfig` may now have a timestamp authority but no transparency log,
+  as is the case for GitHub's private Sigstore instance. Signing against such a
+  configuration produces a `Bundle` with no log entry, whose only source of
+  signed time is an RFC 3161 timestamp. `Bundle.log_entry` is now `None` for
+  such bundles. Verifying them is not yet supported and raises
+  `VerificationError`.
+
 ### Fixed
 
 * Parsing a malformed in-toto statement now includes the underlying validation

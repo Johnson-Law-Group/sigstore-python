@@ -50,6 +50,26 @@ def test_verifier_rejects_trusted_root_without_tlogs(asset):
         Verifier(trusted_root=trusted_root)
 
 
+def test_verifier_rejects_bundle_without_log_entry(signing_bundle, null_policy):
+    """
+    A bundle with a signed timestamp but no transparency log entry can be
+    produced, but verifying it is unsupported and must fail cleanly.
+    """
+    _, bundle = signing_bundle("bundle_v3.txt")
+    cert, content, _ = bundle._to_parts()
+    tsa_only = Bundle._from_parts(
+        cert, content, None, [pretend.stub(as_bytes=lambda: b"timestamp")]
+    )
+
+    verifier = Verifier.__new__(Verifier)
+
+    with pytest.raises(VerificationError, match="no transparency log entry"):
+        verifier.verify_artifact(b"hello", tsa_only, null_policy)
+
+    with pytest.raises(VerificationError, match="no transparency log entry"):
+        verifier.verify_dsse(tsa_only, null_policy)
+
+
 @pytest.mark.production
 def test_verifier_production():
     verifier = Verifier.production()

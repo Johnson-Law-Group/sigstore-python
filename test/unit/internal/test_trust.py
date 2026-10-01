@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +23,9 @@ from sigstore_models.trustroot.v1 import (
     Service,
     ServiceConfiguration,
     ServiceSelector,
+)
+from sigstore_models.trustroot.v1 import (
+    SigningConfig as _SigningConfig,
 )
 
 from sigstore._internal.fulcio.client import FulcioClient
@@ -104,6 +108,29 @@ class TestSigningConfig:
         assert len(tlogs) == 1
         assert isinstance(tlogs[0], RekorClient)
         assert tlogs[0].url == "https://rekor.example.com/api/v1"
+
+    def test_good_tsa_only(self, asset):
+        """Test case where the instance has a timestamp authority but no tlog"""
+        path = asset("signing_config/signingconfig-tsa-only.v2.json")
+        signing_config = SigningConfig.from_file(path)
+
+        assert signing_config.get_tlogs() == []
+
+        tsas = signing_config.get_tsas()
+        assert len(tsas) == 1
+        assert tsas[0].url == "https://timestamp.example.com/api/v1/timestamp"
+
+    def test_no_tlog_or_tsa(self, asset):
+        inner = json.loads(
+            asset("signing_config/signingconfig-tsa-only.v2.json").read_bytes()
+        )
+        del inner["tsaUrls"]
+        del inner["tsaConfig"]
+
+        with pytest.raises(
+            Error, match="No valid Rekor transparency log or timestamp authority"
+        ):
+            SigningConfig(_SigningConfig.from_json(json.dumps(inner)))
 
     @pytest.mark.parametrize(
         "services, versions, config, expected_result",

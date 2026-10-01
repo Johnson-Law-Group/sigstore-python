@@ -61,7 +61,12 @@ from sigstore._internal.trust import KeyringPurpose
 from sigstore._utils import base64_encode_pem_cert, sha256_digest
 from sigstore.errors import CertValidationError, VerificationError
 from sigstore.hashes import Hashed
-from sigstore.models import Bundle, ClientTrustConfig, TrustedRoot
+from sigstore.models import (
+    Bundle,
+    ClientTrustConfig,
+    TransparencyLogEntry,
+    TrustedRoot,
+)
 from sigstore.verify.policy import VerificationPolicy
 
 _logger = logging.getLogger(__name__)
@@ -235,10 +240,13 @@ class Verifier:
         # NOTE: We only include this timestamp if it's accompanied by an inclusion
         # promise that cryptographically binds it. We verify the inclusion promise
         # itself later, as part of log entry verification.
+        log_entry = bundle.log_entry
         if (
-            timestamp := bundle.log_entry._inner.integrated_time
-        ) and bundle.log_entry._inner.inclusion_promise:
-            kv = bundle.log_entry._inner.kind_version
+            log_entry
+            and (timestamp := log_entry._inner.integrated_time)
+            and log_entry._inner.inclusion_promise
+        ):
+            kv = log_entry._inner.kind_version
             if not (kv.kind in ["dsse", "hashedrekord"] and kv.version == "0.0.1"):
                 raise VerificationError(
                     "Integrated time only supported for dsse/hashedrekord 0.0.1 types"
@@ -294,6 +302,10 @@ class Verifier:
 
         Raises `VerificationError` on all failures.
         """
+
+        # Verifying a bundle requires its transparency log entry; bundles
+        # without one (see `Bundle.log_entry`) can be produced but not verified.
+        _require_log_entry(bundle)
 
         # In order to verify an artifact, we need to achieve the following:
         #
@@ -362,7 +374,7 @@ class Verifier:
         # (4): verify the inclusion proof and signed checkpoint for the
         #      log entry.
         # (5): verify the inclusion promise for the log entry, if present.
-        entry = bundle.log_entry
+        entry = _require_log_entry(bundle)
         try:
             entry._verify(self._trusted_root.rekor_keyring(KeyringPurpose.VERIFY))
         except VerificationError as exc:
@@ -428,7 +440,7 @@ class Verifier:
         # hash that we *cannot* verify (the envelope is uncanonicalized JSON),
         # so we manually pick apart the entry body and verify the parts we
         # can (payload hash and signature list).
-        entry = bundle.log_entry
+        entry = _require_log_entry(bundle)
         kind = entry._inner.kind_version.kind
         version = entry._inner.kind_version.version
         if kind == "hashedrekord" and version == "0.0.2":
@@ -493,7 +505,7 @@ class Verifier:
 
         # (8): verify the consistency of the log entry's body against
         #      the other bundle materials (and input being verified).
-        entry = bundle.log_entry
+        entry = _require_log_entry(bundle)
         if entry._inner.kind_version.kind != "hashedrekord":
             raise VerificationError(
                 f"Expected entry type hashedrekord, got {entry._inner.kind_version.kind}"
@@ -509,11 +521,24 @@ class Verifier:
             )
 
 
+def _require_log_entry(bundle: Bundle) -> TransparencyLogEntry:
+    """
+    Return the bundle's log entry, or raise `VerificationError` if it has none.
+    """
+    entry = bundle.log_entry
+    if entry is None:
+        raise VerificationError(
+            "bundle has no transparency log entry; verifying bundles without "
+            "one is not supported"
+        )
+    return entry
+
+
 def _validate_dsse_v001_entry_body(bundle: Bundle) -> None:
     """
     Validate the Entry body for dsse v001.
     """
-    entry = bundle.log_entry
+    entry = _require_log_entry(bundle)
     envelope = bundle._dsse_envelope
     if envelope is None:
         raise VerificationError(
@@ -555,7 +580,7 @@ def _validate_hashedrekord_v001_entry_body(
     """
     Validate the Entry body for hashedrekord v001.
     """
-    entry = bundle.log_entry
+    entry = _require_log_entry(bundle)
     expected_body = _hashedrekord_from_parts(
         bundle.signing_certificate,
         bundle._inner.message_signature.signature,  # type: ignore[union-attr]
@@ -582,7 +607,7 @@ def _validate_hashedrekord_v002_dsse_entry_body(bundle: Bundle) -> None:
       - signature.content = envelope.signatures[0].sig.
       - signature.verifier = the bundle's signing certificate.
     """
-    entry = bundle.log_entry
+    entry = _require_log_entry(bundle)
     envelope = bundle._dsse_envelope
     if envelope is None:
         raise VerificationError(
@@ -626,7 +651,7 @@ def _validate_hashedrekord_v002_entry_body(
     """
     Validate Entry body for hashedrekord v002.
     """
-    entry = bundle.log_entry
+    entry = _require_log_entry(bundle)
     if bundle._inner.message_signature is None:
         raise VerificationError(
             "invalid hashedrekord log entry: missing message signature"

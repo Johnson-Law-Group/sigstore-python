@@ -15,6 +15,7 @@
 import json
 from base64 import b64encode
 
+import pretend
 import pytest
 from sigstore_models.rekor.v1 import KindVersion
 from sigstore_models.rekor.v1 import TransparencyLogEntry as _TransparencyLogEntry
@@ -138,9 +139,50 @@ class TestBundle:
 
     def test_invalid_no_log_entry(self, signing_bundle):
         with pytest.raises(
-            InvalidBundle, match="expected exactly one log entry in bundle"
+            InvalidBundle,
+            match=r"bundle must contain a log entry or signed timestamp\(s\)",
         ):
             signing_bundle("bundle_no_log_entry.txt")
+
+    def test_multiple_log_entries(self, signing_bundle):
+        _, bundle = signing_bundle("bundle_v3.txt")
+        inner = json.loads(bundle.to_json())
+        entries = inner["verificationMaterial"]["tlogEntries"]
+        inner["verificationMaterial"]["tlogEntries"] = entries * 2
+
+        with pytest.raises(
+            InvalidBundle, match="expected at most one log entry in bundle"
+        ):
+            Bundle.from_json(json.dumps(inner))
+
+    def test_tsa_only_bundle(self, signing_bundle):
+        _, bundle = signing_bundle("bundle_v3.txt")
+        cert, content, _ = bundle._to_parts()
+
+        tsa_only = Bundle._from_parts(
+            cert,
+            content,
+            None,
+            [pretend.stub(as_bytes=lambda: b"timestamp")],
+        )
+
+        assert tsa_only.log_entry is None
+        assert tsa_only._inner.verification_material.tlog_entries == []
+
+        # A TSA-only bundle survives serialization.
+        roundtripped = Bundle.from_json(tsa_only.to_json())
+        assert roundtripped.log_entry is None
+        assert roundtripped.signing_certificate == cert
+
+    def test_no_log_entry_without_timestamp(self, signing_bundle):
+        _, bundle = signing_bundle("bundle_v3.txt")
+        cert, content, _ = bundle._to_parts()
+
+        with pytest.raises(
+            InvalidBundle,
+            match=r"bundle must contain a log entry or signed timestamp\(s\)",
+        ):
+            Bundle._from_parts(cert, content, None, [])
 
     def test_verification_materials_offline_no_checkpoint(self, signing_bundle):
         with pytest.raises(
